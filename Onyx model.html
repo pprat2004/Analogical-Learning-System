@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analogical Learning System | DSU GenAI Project</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- 
+        LOCAL MODEL: @xenova/transformers runs ONNX models entirely in the browser
+        via WebAssembly — zero server calls, zero API keys needed.
+        Model used: Xenova/LaMini-Flan-T5-248M  (instruction-tuned, ~250M params, ~500 MB)
+        Downloaded once from HuggingFace CDN and cached in the browser's Cache API.
+    -->
+    <script type="module">
+        // Make the pipeline builder available globally so Babel/React can call it.
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+        // Use the remote HuggingFace CDN for weights (browser-cached after first load).
+        env.allowLocalModels = false;
+
+        // Expose globally
+        window.__transformers = { pipeline, env };
+        window.__pipelineCache = {};
+
+        /**
+         * getTextGenPipeline()
+         * Lazily loads the text-generation pipeline the first time it is called.
+         * Subsequent calls return the cached pipeline immediately.
+         *
+         * @param {Function} onProgress  - called with 0-100 progress values during download
+         * @returns {Promise<Function>}  - a transformers.js pipeline function
+         */
+        window.getTextGenPipeline = async function(onProgress) {
+            if (window.__pipelineCache.generator) return window.__pipelineCache.generator;
+
+            const generator = await pipeline(
+                'text2text-generation',         // seq2seq task (T5 family)
+                'Xenova/LaMini-Flan-T5-248M',   // 248 M params, instruction-tuned
+                {
+                    progress_callback: (p) => {
+                        // p.progress is 0-100 (only present during weight download)
+                        if (p && typeof p.progress === 'number') {
+                            onProgress && onProgress(Math.round(p.progress));
+                        }
+                    }
+                }
+            );
+
+            window.__pipelineCache.generator = generator;
+            return generator;
+        };
+
+        // Signal React that the module loaded
+        window.__transformersReady = true;
+        window.dispatchEvent(new Event('transformers-ready'));
+    </script>
+
+    <style>
+        * { 
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body { background: #f8f9fa; color: #1a1a1a; }
+
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 1.5rem; }
+
+        .header-gradient { background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); }
+
+        .card {
+            background: white; border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            transition: box-shadow 0.3s ease;
+        }
+        .card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+
+        .btn-primary {
+            background: #1e3a8a; color: white; padding: 0.75rem 1.5rem;
+            border-radius: 8px; font-weight: 500; border: none; cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .btn-primary:hover { background: #1e40af; transform: translateY(-1px); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .btn-secondary {
+            background: white; color: #1e3a8a; padding: 0.75rem 1.5rem;
+            border-radius: 8px; font-weight: 500; border: 2px solid #1e3a8a; cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .btn-secondary:hover { background: #f0f4ff; }
+
+        .input-field {
+            width: 100%; padding: 0.875rem 1rem; border: 2px solid #e5e7eb;
+            border-radius: 8px; font-size: 0.9375rem; transition: border-color 0.3s ease;
+        }
+        .input-field:focus { outline: none; border-color: #3b82f6; }
+
+        .tag {
+            display: inline-block; padding: 0.5rem 1rem; border-radius: 6px;
+            font-size: 0.875rem; font-weight: 500; cursor: pointer;
+            transition: all 0.2s ease; border: 2px solid transparent;
+        }
+        .tag-inactive { background: #f3f4f6; color: #6b7280; }
+        .tag-inactive:hover { background: #e5e7eb; }
+        .tag-active { background: #1e3a8a; color: white; border-color: #1e3a8a; }
+
+        .processing-step {
+            opacity: 0; animation: fadeInUp 0.5s ease forwards;
+        }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .spinner {
+            border: 3px solid #f3f4f6; border-top: 3px solid #1e3a8a;
+            border-radius: 50%; width: 24px; height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .badge {
+            display: inline-block; padding: 0.25rem 0.75rem; border-radius: 4px;
+            font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        .badge-blue  { background: #dbeafe; color: #1e40af; }
+        .badge-green { background: #d1fae5; color: #065f46; }
+        .badge-purple { background: #ede9fe; color: #5b21b6; }
+
+        .section-title { font-size: 1.125rem; font-weight: 600; color: #111827; margin-bottom: 1rem; }
+        .divider { height: 1px; background: #e5e7eb; margin: 1.5rem 0; }
+
+        .professional-header { border-bottom: 1px solid #e5e7eb; background: white; }
+
+        .explanation-box {
+            background: linear-gradient(to bottom, #f0f9ff, #ffffff);
+            border-left: 4px solid #1e3a8a; padding: 2rem; border-radius: 12px; line-height: 1.8;
+        }
+
+        .feature-icon {
+            width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;
+            background: #f0f9ff; border-radius: 10px; color: #1e3a8a; font-size: 1.5rem;
+        }
+
+        /* Model loading progress bar */
+        .model-progress-bar-wrap {
+            width: 100%; height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; margin-top: 0.75rem;
+        }
+        .model-progress-bar {
+            height: 100%; background: linear-gradient(90deg, #1e3a8a, #3b82f6);
+            border-radius: 4px; transition: width 0.3s ease;
+        }
+
+        /* On-device badge pulse */
+        @keyframes pulse-green {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0.4); }
+            50%       { box-shadow: 0 0 0 6px rgba(16,185,129,0); }
+        }
+        .badge-ondevice {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            background: #d1fae5; color: #065f46; border-radius: 999px;
+            padding: 0.25rem 0.75rem; font-size: 0.75rem; font-weight: 600;
+            animation: pulse-green 2s infinite;
+        }
+        .badge-ondevice .dot {
+            width: 8px; height: 8px; border-radius: 50%; background: #10b981;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        /* ─────────────────────────────────────────────────────────────
+           NLP helpers (unchanged from original)
+        ───────────────────────────────────────────────────────────── */
+        function preprocessInput(query) {
+            const cleaned = query.trim().toLowerCase();
+            const tokens = cleaned.split(/\s+/).filter(t => t.length > 2);
+            return { original: query, cleaned, tokens, wordCount: tokens.length };
+        }
+
+        function analyzeUserContext(profile) {
+            return {
+                primaryHobby: profile.hobbies[0] || 'general',
+                interests: profile.interests.join(', '),
+                learningStyle: profile.hobbies.length > 0 ? 'activity-based' : 'conceptual'
+            };
+        }
+
+        function mapConceptToAnalogy(concept, context) {
+            const lower = concept.toLowerCase();
+            let subject = 'general';
+            if (lower.includes('force') || lower.includes('motion') || lower.includes('newton')) subject = 'physics';
+            else if (lower.includes('atom') || lower.includes('reaction') || lower.includes('chemical')) subject = 'chemistry';
+            else if (lower.includes('cell') || lower.includes('photo') || lower.includes('organ')) subject = 'biology';
+            return { subject, primaryHobby: context.primaryHobby };
+        }
+
+        /* ─────────────────────────────────────────────────────────────
+           LOCAL MODEL — replaces Anthropic API call entirely.
+
+           Uses window.getTextGenPipeline() defined in the ES module
+           above.  The pipeline downloads the ONNX weights from
+           HuggingFace CDN on first use (cached by the browser
+           afterwards via Cache API, so subsequent loads are instant).
+        ───────────────────────────────────────────────────────────── */
+
+        /**
+         * generateExplanation()
+         * Runs seq2seq inference locally with LaMini-Flan-T5-248M.
+         * Falls back to the deterministic template generator if the
+         * transformers module hasn't loaded or inference fails.
+         *
+         * @param {object} preprocessed
+         * @param {object} context
+         * @param {object} mapping
+         * @param {Function} onProgress  0-100 during model download
+         * @returns {Promise<string>}
+         */
+        async function generateExplanation(preprocessed, context, mapping, onProgress) {
+            try {
+                // Compose an instruction prompt for the T5 model.
+                // LaMini-Flan-T5 is instruction-tuned so it follows these directly.
+                const prompt =
+                    `Explain the concept "${preprocessed.original}" in simple terms for a student. ` +
+                    `Use an analogy related to ${context.primaryHobby}. ` +
+                    `The student is interested in ${context.interests}. ` +
+                    `Structure the explanation with a heading, an analogy section, and a key-takeaway section. ` +
+                    `Keep it under 200 words.`;
+
+                const generator = await window.getTextGenPipeline(onProgress);
+
+                const output = await generator(prompt, {
+                    max_new_tokens: 300,
+                    // Greedy decoding for consistency
+                    do_sample: false,
+                });
+
+                const text = output[0]?.generated_text || output[0]?.translation_text || '';
+                if (!text.trim()) throw new Error('empty output');
+
+                // Light post-processing: ensure it starts capitalised.
+                return text.charAt(0).toUpperCase() + text.slice(1);
+
+            } catch (err) {
+                console.warn('Local model fallback triggered:', err);
+                return generateFallback(preprocessed.original, context);
+            }
+        }
+
+        /* ─────────────────────────────────────────────────────────────
+           Deterministic fallback (kept from original, extended slightly)
+        ───────────────────────────────────────────────────────────── */
+        function generateFallback(concept, context) {
+            const hobby = context.primaryHobby;
+            const lower = concept.toLowerCase();
+
+            if (lower.includes('newton') || lower.includes('motion')) {
+                if (hobby.toLowerCase().includes('cricket')) {
+                    return `**Newton's Laws & Cricket**\n\n**First Law (Inertia):** A cricket ball on the pitch stays still until you pick it up. Once hit, it keeps flying until something stops it (fielder, gravity, boundary).\n\n**Second Law (F=ma):** The harder you swing the bat (more force), the faster the ball accelerates. Same mass, different force = different speed.\n\n**Third Law (Action-Reaction):** When the ball hits your bat, you feel the impact in your hands. That's the ball pushing back with equal force. Fast bowlers make you feel this more!\n\nThink of physics as the rulebook for how objects move in cricket – or anywhere else.`;
+                }
+                if (hobby.toLowerCase().includes('gaming')) {
+                    return `**Newton's Laws & Gaming**\n\n**First Law (Inertia):** Your character slides when you stop pressing the key — it keeps moving until friction or a wall stops it.\n\n**Second Law (F=ma):** In racing games, a heavier car needs more engine force to reach the same speed as a lighter car.\n\n**Third Law (Action-Reaction):** When you shoot a weapon, the character gets a kickback — the bullet pushes the gun backward with equal force.\n\nPhysics engines in games literally simulate Newton's laws!`;
+                }
+                return `**Newton's Laws Explained**\n\n**First Law:** Objects stay still or keep moving unless a force acts on them.\n\n**Second Law:** F = ma — bigger force or smaller mass means more acceleration.\n\n**Third Law:** Every action has an equal and opposite reaction.\n\nThese govern all motion from ${hobby} to space travel.`;
+            }
+
+            if (lower.includes('photo')) {
+                return `**Photosynthesis — Plants as Solar Factories**\n\nImagine a plant as a tiny power station:\n- **Fuel in:** Sunlight + CO₂ + Water\n- **Product out:** Glucose (energy) + Oxygen\n\nChlorophyll in leaves acts like solar panels — it captures light and drives the conversion reaction.\n\n**Equation:** 6CO₂ + 6H₂O + Light → C₆H₁₂O₆ + 6O₂\n\n**Why it matters:** Every oxygen molecule you breathe came from this process.`;
+            }
+
+            if (lower.includes('atom')) {
+                return `**Atoms — The Building Blocks**\n\nThink of an atom like a tiny solar system:\n- The **nucleus** (protons + neutrons) is the Sun at the centre.\n- **Electrons** orbit like planets.\n\nDifferent elements have different numbers of protons — that's what makes gold different from carbon.\n\nRelated to ${hobby}: the metal in your ${hobby.toLowerCase()} equipment is made of atoms arranged in a crystal lattice!`;
+            }
+
+            return `**Understanding ${concept}**\n\nLet's connect this to ${hobby}:\n\nEvery complex concept has underlying patterns similar to what you experience in ${hobby}. The key is identifying the analogous structure.\n\n**Core idea:** Break the concept into its smallest components, understand how each part behaves, then see how they interact as a system.\n\n**Remember:** Science describes the same world you navigate every day — just with more precision.`;
+        }
+
+        /* ─────────────────────────────────────────────────────────────
+           Video Script Generator (unchanged)
+        ───────────────────────────────────────────────────────────── */
+        function generateVideoScript(concept, explanation, context) {
+            return {
+                title: `Understanding: ${concept}`,
+                duration: '60-90 seconds',
+                scenes: [
+                    { time: '0-5s',   action: 'Title card appears',  text: `"${concept}"`,                                           visual: 'Clean title with subtle animation' },
+                    { time: '5-15s',  action: 'Introduction',        text: `Struggling with this concept? Let's break it down using ${context.primaryHobby}.`, visual: `Icon representing ${context.primaryHobby}` },
+                    { time: '15-55s', action: 'Main explanation',    text: explanation.substring(0, 200),                              visual: 'Split screen: analogy vs concept diagram' },
+                    { time: '55-70s', action: 'Summary',             text: `Key takeaway: It's all about understanding the core principle.`, visual: 'Animated bullet points' },
+                    { time: '70-75s', action: 'Closing',             text: 'For more explanations, check your NCERT textbook.',        visual: 'Book icon with link overlay' }
+                ],
+                tools: ['Canva - Design slides', 'ElevenLabs - AI voiceover (free tier)', 'CapCut - Video editing', 'Pexels - Stock footage']
+            };
+        }
+
+        /* ─────────────────────────────────────────────────────────────
+           App Component
+        ───────────────────────────────────────────────────────────── */
+        function App() {
+            const [stage, setStage] = useState('welcome');
+            const [profile, setProfile] = useState({ name: '', hobbies: [], interests: [] });
+            const [query, setQuery] = useState('');
+            const [processing, setProcessing] = useState([]);
+            const [result, setResult] = useState(null);
+            const [showScript, setShowScript] = useState(false);
+            const [modelReady, setModelReady] = useState(!!window.__transformersReady);
+            const [modelProgress, setModelProgress] = useState(0);
+            const [modelLoading, setModelLoading] = useState(false);
+
+            const hobbies   = ['Cricket', 'Football', 'Gaming', 'Cooking', 'Reading', 'Music', 'Art', 'Dance'];
+            const interests = ['Physics', 'Chemistry', 'Biology', 'Mathematics', 'Computer Science', 'Environmental Science'];
+
+            useEffect(() => {
+                const handler = () => setModelReady(true);
+                window.addEventListener('transformers-ready', handler);
+                return () => window.removeEventListener('transformers-ready', handler);
+            }, []);
+
+            /* Warm-up: eagerly start downloading the model weights as soon
+               as the user lands on the query page so inference is faster. */
+            useEffect(() => {
+                if (stage === 'query' && modelReady && !window.__pipelineCache?.generator) {
+                    setModelLoading(true);
+                    window.getTextGenPipeline((p) => setModelProgress(p)).then(() => {
+                        setModelLoading(false);
+                        setModelProgress(100);
+                    }).catch(() => setModelLoading(false));
+                }
+            }, [stage, modelReady]);
+
+            const processQuery = async () => {
+                setStage('processing');
+                setProcessing([]);
+
+                await addStep('Preprocessing', 'Tokenizing and normalizing input');
+                const preprocessed = preprocessInput(query);
+
+                await addStep('Context Analysis', 'Analyzing user profile and preferences');
+                const context = analyzeUserContext(profile);
+
+                await addStep('Analogy Mapping', 'Mapping concept to real-world scenarios');
+                const mapping = mapConceptToAnalogy(query, context);
+
+                await addStep('Local Model Inference', 'Running LaMini-Flan-T5 on-device (no API call)');
+                const explanation = await generateExplanation(preprocessed, context, mapping, (p) => {
+                    // If model downloads during processing, update last step label
+                    setModelProgress(p);
+                });
+
+                await addStep('Finalizing', 'Preparing output');
+
+                setResult({ explanation, context, mapping, preprocessed });
+                setTimeout(() => setStage('result'), 500);
+            };
+
+            async function addStep(title, desc) {
+                setProcessing(prev => [...prev, { title, desc, status: 'processing' }]);
+                await new Promise(r => setTimeout(r, 600));
+                setProcessing(prev => {
+                    const updated = [...prev];
+                    updated[updated.length - 1].status = 'complete';
+                    return updated;
+                });
+            }
+
+            /* ── Welcome ── */
+            if (stage === 'welcome') {
+                return (
+                    <div>
+                        <div className="professional-header">
+                            <div className="container" style={{ padding: '1.5rem' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                    <div style={{ width: '48px', height: '48px', background: '#1e3a8a', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: '1.5rem', fontWeight: 'bold' }}>A</div>
+                                    <div>
+                                        <h1 style={{ fontSize: '1.5rem', fontWeight: '700', color: '#111827' }}>Analogical Learning System</h1>
+                                        <p style={{ fontSize: '0.875rem', color: '#6b7280', marginTop: '0.25rem' }}>GenAI-Powered Educational Platform</p>
+                                    </div>
+                                    <div style={{ marginLeft: 'auto' }}>
+                                        <span className="badge-ondevice"><span className="dot"></span>On-Device AI</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="container" style={{ paddingTop: '3rem', paddingBottom: '3rem' }}>
+                            <div style={{ textAlign: 'center', marginBottom: '3rem' }}>
+                                <span className="badge badge-blue" style={{ marginBottom: '1rem' }}>DSU Research Project</span>
+                                <h2 style={{ fontSize: '2.5rem', fontWeight: '700', color: '#111827', marginBottom: '1rem' }}>Simplifying Science Education</h2>
+                                <p style={{ fontSize: '1.125rem', color: '#6b7280', maxWidth: '700px', margin: '0 auto' }}>
+                                    Using AI and personalized analogies to make complex STEM concepts easy to understand
+                                </p>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1.5rem', marginBottom: '3rem' }}>
+                                <div className="card" style={{ padding: '2rem' }}>
+                                    <div className="feature-icon" style={{ marginBottom: '1rem' }}><i className="fas fa-brain"></i></div>
+                                    <h3 style={{ fontSize: '1.125rem', fontWeight: '600', marginBottom: '0.5rem' }}>NLP Processing</h3>
+                                    <p style={{ color: '#6b7280', fontSize: '0.9375rem' }}>Tokenization, context analysis and concept mapping runs locally in your browser.</p>
+                                </div>
+                                <div className="card" style={{ padding: '2rem' }}>
+                                    <div className="feature-icon" style={{ marginBottom: '1rem' }}><i className="fas fa-microchip"></i></div>
+                                    <h3 style={{ fontSize: '1.125rem', fontWeight: '600', marginBottom: '0.5rem' }}>On-Device Model</h3>
+                                    <p style={{ color: '#6b7280', fontSize: '0.9375rem' }}>LaMini-Flan-T5-248M runs entirely in your browser via WebAssembly — no API key, no server.</p>
+                                </div>
+                                <div className="card" style={{ padding: '2rem' }}>
+                                    <div className="feature-icon" style={{ marginBottom: '1rem' }}><i className="fas fa-lightbulb"></i></div>
+                                    <h3 style={{ fontSize: '1.125rem', fontWeight: '600', marginBottom: '0.5rem' }}>Smart Analogies</h3>
+                                    <p style={{ color: '#6b7280', fontSize: '0.9375rem' }}>Concepts explained through your hobbies and daily experiences.</p>
+                                </div>
+                                <div className="card" style={{ padding: '2rem' }}>
+                                    <div className="feature-icon" style={{ marginBottom: '1rem' }}><i className="fas fa-video"></i></div>
+                                    <h3 style={{ fontSize: '1.125rem', fontWeight: '600', marginBottom: '0.5rem' }}>Video Scripts</h3>
+                                    <p style={{ color: '#6b7280', fontSize: '0.9375rem' }}>Production-ready scripts for creating educational videos.</p>
+                                </div>
+                            </div>
+
+                            {/* Model info banner */}
+                            <div className="card" style={{ padding: '1.25rem 1.5rem', marginBottom: '2rem', background: '#f0f9ff', border: '1px solid #bfdbfe', borderRadius: '10px', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                                <i className="fas fa-info-circle" style={{ color: '#1e40af', fontSize: '1.25rem' }}></i>
+                                <div style={{ flex: 1 }}>
+                                    <p style={{ fontSize: '0.9rem', fontWeight: '600', color: '#1e3a8a', marginBottom: '0.2rem' }}>Running LaMini-Flan-T5-248M locally via @xenova/transformers</p>
+                                    <p style={{ fontSize: '0.8rem', color: '#3b82f6' }}>
+                                        ~500 MB downloaded from HuggingFace on first use, then cached permanently in your browser. Works offline afterwards.
+                                    </p>
+                                </div>
+                                <span className="badge badge-purple">WebAssembly / ONNX Runtime</span>
+                            </div>
+
+                            <div style={{ textAlign: 'center' }}>
+                                <button className="btn-primary" onClick={() => setStage('profile')} style={{ fontSize: '1rem', padding: '1rem 2rem' }}>
+                                    Get Started <i className="fas fa-arrow-right" style={{ marginLeft: '0.5rem' }}></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            /* ── Profile ── */
+            if (stage === 'profile') {
+                return (
+                    <div>
+                        <div className="professional-header">
+                            <div className="container" style={{ padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                <button className="btn-secondary" onClick={() => setStage('welcome')} style={{ padding: '0.5rem 1rem' }}>
+                                    <i className="fas fa-arrow-left"></i>
+                                </button>
+                                <h1 style={{ fontSize: '1.25rem', fontWeight: '600' }}>User Profile</h1>
+                            </div>
+                        </div>
+
+                        <div className="container" style={{ paddingTop: '2rem', paddingBottom: '2rem' }}>
+                            <div className="card" style={{ padding: '2.5rem', maxWidth: '700px', margin: '0 auto' }}>
+                                <p style={{ color: '#6b7280', marginBottom: '2rem' }}>Tell us about yourself to personalize your learning experience</p>
+
+                                <div style={{ marginBottom: '1.5rem' }}>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                        Full Name <span style={{ color: '#dc2626' }}>*</span>
+                                    </label>
+                                    <input type="text" className="input-field" value={profile.name}
+                                        onChange={(e) => setProfile({...profile, name: e.target.value})}
+                                        placeholder="Enter your name" />
+                                </div>
+
+                                <div style={{ marginBottom: '1.5rem' }}>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                        Hobbies & Interests <span style={{ color: '#dc2626' }}>*</span>
+                                    </label>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                                        {hobbies.map(h => (
+                                            <span key={h}
+                                                className={`tag ${profile.hobbies.includes(h) ? 'tag-active' : 'tag-inactive'}`}
+                                                onClick={() => setProfile({
+                                                    ...profile,
+                                                    hobbies: profile.hobbies.includes(h)
+                                                        ? profile.hobbies.filter(x => x !== h)
+                                                        : [...profile.hobbies, h]
+                                                })}>
+                                                {h}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div style={{ marginBottom: '2rem' }}>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                        Academic Interests <span style={{ color: '#dc2626' }}>*</span>
+                                    </label>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                                        {interests.map(i => (
+                                            <span key={i}
+                                                className={`tag ${profile.interests.includes(i) ? 'tag-active' : 'tag-inactive'}`}
+                                                onClick={() => setProfile({
+                                                    ...profile,
+                                                    interests: profile.interests.includes(i)
+                                                        ? profile.interests.filter(x => x !== i)
+                                                        : [...profile.interests, i]
+                                                })}>
+                                                {i}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <button className="btn-primary"
+                                    onClick={() => {
+                                        if (profile.name && profile.hobbies.length > 0 && profile.interests.length > 0) {
+                                            setStage('query');
+                                        } else {
+                                            alert('Please complete all required fields');
+                                        }
+                                    }}
+                                    style={{ width: '100%' }}>
+                                    Continue
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            /* ── Query ── */
+            if (stage === 'query') {
+                return (
+                    <div>
+                        <div className="professional-header">
+                            <div className="container" style={{ padding: '1.5rem' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                        <button className="btn-secondary" onClick={() => setStage('profile')} style={{ padding: '0.5rem 1rem' }}>
+                                            <i className="fas fa-arrow-left"></i>
+                                        </button>
+                                        <div>
+                                            <h1 style={{ fontSize: '1.25rem', fontWeight: '600' }}>Hello, {profile.name}</h1>
+                                            <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>What would you like to learn today?</p>
+                                        </div>
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                        <span className="badge-ondevice"><span className="dot"></span>On-Device</span>
+                                        <button className="btn-secondary" onClick={() => setStage('welcome')} style={{ padding: '0.5rem 1rem' }}>
+                                            <i className="fas fa-home"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="container" style={{ paddingTop: '2rem', paddingBottom: '2rem' }}>
+                            <div className="card" style={{ padding: '2.5rem', maxWidth: '800px', margin: '0 auto' }}>
+
+                                {/* Model loading progress shown while weights download */}
+                                {modelLoading && (
+                                    <div style={{ marginBottom: '1.5rem', padding: '1rem', background: '#f0f9ff', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem', fontWeight: '600', color: '#1e3a8a', marginBottom: '0.5rem' }}>
+                                            <span><i className="fas fa-download" style={{ marginRight: '0.5rem' }}></i>Downloading model weights…</span>
+                                            <span>{modelProgress}%</span>
+                                        </div>
+                                        <div className="model-progress-bar-wrap">
+                                            <div className="model-progress-bar" style={{ width: `${modelProgress}%` }}></div>
+                                        </div>
+                                        <p style={{ fontSize: '0.75rem', color: '#6b7280', marginTop: '0.5rem' }}>
+                                            LaMini-Flan-T5-248M (~500 MB) — cached after first download
+                                        </p>
+                                    </div>
+                                )}
+
+                                {!modelLoading && modelProgress === 100 && (
+                                    <div style={{ marginBottom: '1.5rem', padding: '0.75rem 1rem', background: '#d1fae5', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.875rem', color: '#065f46' }}>
+                                        <i className="fas fa-check-circle"></i>
+                                        <span>Model ready — inference will run locally on your device.</span>
+                                    </div>
+                                )}
+
+                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.75rem' }}>
+                                    Enter a Scientific Concept
+                                </label>
+                                <textarea className="input-field" value={query}
+                                    onChange={(e) => setQuery(e.target.value)}
+                                    placeholder="e.g., Explain Newton's Laws of Motion"
+                                    rows="5"
+                                    style={{ resize: 'vertical', minHeight: '120px' }} />
+
+                                <div style={{ marginTop: '1.5rem', padding: '1rem', background: '#f9fafb', borderRadius: '8px' }}>
+                                    <p style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>Your Profile:</p>
+                                    <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                                        <strong>Hobbies:</strong> {profile.hobbies.join(', ')}<br/>
+                                        <strong>Interests:</strong> {profile.interests.join(', ')}
+                                    </p>
+                                </div>
+
+                                <button className="btn-primary"
+                                    onClick={processQuery}
+                                    disabled={!query.trim() || modelLoading}
+                                    style={{ width: '100%', marginTop: '1.5rem', opacity: (query.trim() && !modelLoading) ? 1 : 0.5 }}>
+                                    {modelLoading ? 'Waiting for model…' : 'Generate Explanation'}
+                                </button>
+
+                                <div style={{ marginTop: '1.5rem' }}>
+                                    <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: '0.75rem' }}>Quick examples:</p>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                                        {["Explain photosynthesis", "Newton's Laws", "How atoms work"].map(ex => (
+                                            <button key={ex} className="tag tag-inactive" onClick={() => setQuery(ex)}>{ex}</button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            /* ── Processing ── */
+            if (stage === 'processing') {
+                return (
+                    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8f9fa' }}>
+                        <div className="card" style={{ padding: '3rem', maxWidth: '600px', width: '100%', margin: '1rem' }}>
+                            <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
+                                <div className="spinner" style={{ margin: '0 auto 1rem' }}></div>
+                                <h2 style={{ fontSize: '1.5rem', fontWeight: '600', marginBottom: '0.5rem' }}>Processing Query</h2>
+                                <p style={{ color: '#6b7280' }}>Running local AI pipeline — no internet required for inference…</p>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                {processing.map((step, idx) => (
+                                    <div key={idx} className="processing-step"
+                                        style={{
+                                            padding: '1rem', borderRadius: '8px',
+                                            background: step.status === 'complete' ? '#d1fae5' : '#f0f9ff',
+                                            border: `2px solid ${step.status === 'complete' ? '#10b981' : '#3b82f6'}`,
+                                            animationDelay: `${idx * 0.1}s`
+                                        }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                            <div style={{ fontSize: '1.5rem' }}>
+                                                {step.status === 'complete'
+                                                    ? <i className="fas fa-check-circle" style={{ color: '#10b981' }}></i>
+                                                    : <div className="spinner" style={{ width: '20px', height: '20px' }}></div>}
+                                            </div>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontWeight: '600', marginBottom: '0.25rem' }}>{step.title}</div>
+                                                <div style={{ fontSize: '0.875rem', color: '#6b7280' }}>{step.desc}</div>
+                                                {/* Show download progress inside the inference step */}
+                                                {step.title === 'Local Model Inference' && step.status !== 'complete' && modelProgress > 0 && modelProgress < 100 && (
+                                                    <div style={{ marginTop: '0.5rem' }}>
+                                                        <div className="model-progress-bar-wrap">
+                                                            <div className="model-progress-bar" style={{ width: `${modelProgress}%` }}></div>
+                                                        </div>
+                                                        <p style={{ fontSize: '0.75rem', color: '#6b7280', marginTop: '0.25rem' }}>Downloading weights: {modelProgress}%</p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            /* ── Result ── */
+            if (stage === 'result' && result) {
+                const script = generateVideoScript(query, result.explanation, result.context);
+                return (
+                    <div>
+                        <div className="professional-header">
+                            <div className="container" style={{ padding: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                <h1 style={{ fontSize: '1.25rem', fontWeight: '600' }}>Explanation Results</h1>
+                                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                                    <span className="badge-ondevice"><span className="dot"></span>Generated on-device</span>
+                                    <button className="btn-secondary" onClick={() => { setQuery(''); setResult(null); setStage('query'); }} style={{ padding: '0.5rem 1rem' }}>New Query</button>
+                                    <button className="btn-secondary" onClick={() => setStage('welcome')} style={{ padding: '0.5rem 1rem' }}><i className="fas fa-home"></i></button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="container" style={{ paddingTop: '2rem', paddingBottom: '3rem' }}>
+                            <div style={{ display: 'grid', gap: '1.5rem' }}>
+                                <div className="card" style={{ padding: '1.5rem' }}>
+                                    <p style={{ fontSize: '0.875rem', fontWeight: '600', color: '#6b7280', marginBottom: '0.5rem' }}>YOUR QUERY</p>
+                                    <p style={{ fontSize: '1.125rem', fontStyle: 'italic' }}>"{query}"</p>
+                                </div>
+
+                                <div className="explanation-box">
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                                        <div style={{ fontSize: '2rem' }}>💡</div>
+                                        <h2 style={{ fontSize: '1.5rem', fontWeight: '700' }}>Personalized Explanation</h2>
+                                    </div>
+                                    <div style={{ fontSize: '1.0625rem', whiteSpace: 'pre-line', color: '#374151' }}>
+                                        {result.explanation}
+                                    </div>
+                                </div>
+
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1rem' }}>
+                                    <button className="card" onClick={() => setShowScript(!showScript)}
+                                        style={{ padding: '1.5rem', textAlign: 'left', cursor: 'pointer', border: 'none' }}>
+                                        <div className="feature-icon" style={{ marginBottom: '1rem' }}><i className="fas fa-video"></i></div>
+                                        <h3 style={{ fontSize: '1rem', fontWeight: '600', marginBottom: '0.5rem' }}>Video Script</h3>
+                                        <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>Production guide for creating educational videos</p>
+                                    </button>
+                                    <button className="card"
+                                        onClick={() => { navigator.clipboard.writeText(result.explanation); alert('Copied to clipboard!'); }}
+                                        style={{ padding: '1.5rem', textAlign: 'left', cursor: 'pointer', border: 'none' }}>
+                                        <div className="feature-icon" style={{ marginBottom: '1rem' }}><i className="fas fa-copy"></i></div>
+                                        <h3 style={{ fontSize: '1rem', fontWeight: '600', marginBottom: '0.5rem' }}>Copy Explanation</h3>
+                                        <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>Save or share this explanation</p>
+                                    </button>
+                                </div>
+
+                                {showScript && (
+                                    <div className="card" style={{ padding: '2rem' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+                                            <h3 style={{ fontSize: '1.5rem', fontWeight: '700' }}>
+                                                <i className="fas fa-video" style={{ marginRight: '0.75rem', color: '#1e3a8a' }}></i>
+                                                Video Production Guide
+                                            </h3>
+                                            <button onClick={() => setShowScript(false)} style={{ background: 'none', border: 'none', fontSize: '1.5rem', cursor: 'pointer', color: '#6b7280' }}>
+                                                <i className="fas fa-times"></i>
+                                            </button>
+                                        </div>
+                                        <div style={{ background: '#f9fafb', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem' }}>
+                                            <p style={{ fontSize: '0.875rem' }}><strong>Title:</strong> {script.title}</p>
+                                            <p style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}><strong>Duration:</strong> {script.duration}</p>
+                                        </div>
+                                        <div className="section-title">Scene Breakdown</div>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+                                            {script.scenes.map((scene, idx) => (
+                                                <div key={idx} style={{ padding: '1rem', background: '#f9fafb', borderLeft: '4px solid #1e3a8a', borderRadius: '8px' }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
+                                                        <span className="badge badge-blue">{scene.time}</span>
+                                                        <span style={{ fontWeight: '600' }}>{scene.action}</span>
+                                                    </div>
+                                                    <p style={{ fontSize: '0.875rem', color: '#6b7280', marginBottom: '0.25rem' }}><strong>Text:</strong> {scene.text}</p>
+                                                    <p style={{ fontSize: '0.875rem', color: '#6b7280' }}><strong>Visual:</strong> {scene.visual}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <div className="section-title">Production Tools (Free)</div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '0.75rem' }}>
+                                            {script.tools.map((tool, idx) => (
+                                                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.875rem' }}>
+                                                    <i className="fas fa-check" style={{ color: '#10b981' }}></i>
+                                                    <span>{tool}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <button className="btn-primary"
+                                            onClick={() => { navigator.clipboard.writeText(JSON.stringify(script, null, 2)); alert('Script copied!'); }}
+                                            style={{ width: '100%', marginTop: '1.5rem' }}>
+                                            <i className="fas fa-copy" style={{ marginRight: '0.5rem' }}></i>Copy Script
+                                        </button>
+                                    </div>
+                                )}
+
+                                <div className="card" style={{ padding: '1.5rem' }}>
+                                    <div className="section-title">Personalization Details</div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+                                        <div>
+                                            <p style={{ fontSize: '0.75rem', color: '#6b7280', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Primary Hobby</p>
+                                            <p style={{ fontWeight: '600' }}>{result.context.primaryHobby}</p>
+                                        </div>
+                                        <div>
+                                            <p style={{ fontSize: '0.75rem', color: '#6b7280', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Subject</p>
+                                            <p style={{ fontWeight: '600', textTransform: 'capitalize' }}>{result.mapping.subject}</p>
+                                        </div>
+                                        <div>
+                                            <p style={{ fontSize: '0.75rem', color: '#6b7280', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Tokens Processed</p>
+                                            <p style={{ fontWeight: '600' }}>{result.preprocessed.wordCount}</p>
+                                        </div>
+                                        <div>
+                                            <p style={{ fontSize: '0.75rem', color: '#6b7280', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Inference</p>
+                                            <p style={{ fontWeight: '600', color: '#065f46' }}>On-device (no API)</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return null;
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
